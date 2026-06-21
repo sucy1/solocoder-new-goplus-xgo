@@ -1,0 +1,77 @@
+name: XGo CI
+
+on:
+  push:
+    branches:
+    - "*"
+  pull_request:
+    branches:
+    - "*"
+
+jobs:
+  Check:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v7
+    - name: Check goreleaser files
+      run: |
+        pip install --no-input pyyaml
+        python .github/workflows/check_goreleaser_config.py
+
+  TestXGoInstaller:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v7
+    - name: Test XGo installer
+      run: |
+        git config --global user.email "build-robot@xgo.dev"
+        git config --global user.name "build robot"
+        go test -v cmd/make_test.go
+
+  Test:
+    strategy:
+      matrix:
+        os:
+        - ubuntu-latest
+        - windows-latest
+        - macos-latest
+        go:
+        - 1.24.x
+        - 1.25.x
+    runs-on: ${{ matrix.os }}
+    steps:
+    - uses: actions/checkout@v7
+
+    - name: Set up Go
+      uses: actions/setup-go@v6
+      with:
+        go-version: ${{ matrix.go }}
+
+    - name: Run testcases
+      run: |
+        go test -v -coverprofile="coverage.txt" -covermode=atomic ./...
+        cd cl; go test -tags=genjs -v .
+
+    - name: Codecov
+      uses: codecov/codecov-action@v7
+      with:
+        slug: goplus/xgo
+
+  FormatCheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.24.2"
+
+      - name: Check formatting
+        run: |
+          if [ -n "$(go fmt ./... | grep -v xgo_autogen)" ]; then
+            echo "Some files are not properly formatted. Please run 'go fmt ./...'"
+            exit 1
+          fi
+          ./all.bash
+          cd cmd/xgo; xgo fmt -t ./...

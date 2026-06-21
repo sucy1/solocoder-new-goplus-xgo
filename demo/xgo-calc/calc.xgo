@@ -1,0 +1,55 @@
+import (
+	"math"
+	"os"
+	"xgo/ast"
+	"xgo/parser"
+	"xgo/token"
+)
+
+func calc(e ast.Expr) float64 {
+	switch e := e.(type) {
+	case *ast.BasicLit:
+		return e.Value.float!
+	case *ast.BinaryExpr:
+		switch e.Op {
+		case token.ADD:
+			return calc(e.X) + calc(e.Y)
+		case token.SUB:
+			return calc(e.X) - calc(e.Y)
+		case token.MUL:
+			return calc(e.X) * calc(e.Y)
+		case token.QUO:
+			return calc(e.X) / calc(e.Y)
+		}
+		panic("unknown binary operator")
+	case *ast.CallExpr:
+		switch e.Fun.(*ast.Ident).Name {
+		case "sin":
+			return math.Sin(calc(e.Args[0]))
+		case "cos":
+			return math.Cos(calc(e.Args[0]))
+		case "pow":
+			return math.Pow(calc(e.Args[0]), calc(e.Args[1]))
+		}
+		panic("unknown function")
+	case *ast.ParenExpr:
+		return calc(e.X)
+	case *ast.UnaryExpr:
+		switch e.Op {
+		case token.SUB:
+			return -calc(e.X)
+		}
+		panic("unknown unary operator")
+	}
+	panic("unknown expression")
+}
+
+print "> "
+for line in os.Stdin {
+	e, err := parser.parseExpr(line)
+	if err != nil {
+		print "error: ${err}\n> "
+	} else {
+		print "${calc(e)}\n> "
+	}
+}

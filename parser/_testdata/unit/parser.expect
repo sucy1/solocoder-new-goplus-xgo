@@ -1,0 +1,37 @@
+package main
+
+file step.xgo
+noEntrypoint
+ast.FuncDecl:
+  Name:
+    ast.Ident:
+      Name: main
+  Type:
+    ast.FuncType:
+      Params:
+        ast.FieldList:
+  Body:
+    ast.BlockStmt:
+      List:
+        ast.ExprStmt:
+          X:
+            ast.CallExpr:
+              Fun:
+                ast.Ident:
+                  Name: wait
+              Args:
+                ast.NumberUnitLit:
+                  Kind: INT
+                  Value: 1
+                  Unit: µs
+        ast.ExprStmt:
+          X:
+            ast.CallExpr:
+              Fun:
+                ast.Ident:
+                  Name: wait
+              Args:
+                ast.NumberUnitLit:
+                  Kind: FLOAT
+                  Value: 0.5
+                  Unit: µs

@@ -1,0 +1,341 @@
+version: 2
+
+env:
+  - DOCKER_IMAGE_REPO={{ envOrDefault "DOCKER_IMAGE_REPO" "xgo" }}
+
+dist: .dist
+
+before:
+  hooks:
+    - go mod download
+
+builds:
+  - id: xgo
+    main: ./cmd/xgo
+    binary: bin/xgo
+    flags:
+      - -trimpath
+    ldflags:
+      - -X github.com/goplus/xgo/env.buildVersion=v{{.Version}}
+      - -X github.com/goplus/xgo/env.buildDate={{.CommitDate}}
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - windows
+      - darwin
+    mod_timestamp: "{{ .CommitTimestamp }}"
+  - id: gop
+    main: ./cmd/xgo
+    binary: bin/gop
+    flags:
+      - -trimpath
+    ldflags:
+      - -X github.com/goplus/xgo/env.buildVersion=v{{.Version}}
+      - -X github.com/goplus/xgo/env.buildDate={{.CommitDate}}
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - windows
+      - darwin
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - format: tar.gz
+    name_template: >-
+      {{.ProjectName}}{{.Version}}.{{.Os}}-{{.Arch}}
+      {{- if .Arm}}v{{.Arm}}{{end}}
+    format_overrides:
+      - goos: windows
+        format: zip
+    files:
+      - "CLAUDE.md"
+      - "CODE_OF_CONDUCT.md"
+      - "Dockerfile"
+      - "LICENSE"
+      - "Makefile"
+      - "README.md"
+      - "all.bash"
+      - "all.bat"
+      - "ast"
+      - "tpl"
+      - "tool"
+      - "builtin"
+      - "cl"
+      - "cmd"
+      - "doc"
+      - "dql"
+      - "encoding"
+      - "env"
+      - "format"
+      - "go.mod"
+      - "go.sum"
+      - "make.bash"
+      - "make.bat"
+      - "parser"
+      - "printer"
+      - "scanner"
+      - "test"
+      - "demo"
+      - "token"
+      - "x"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+
+dockers_v2:
+  - id: xgo
+    dockerfile: Dockerfile
+    images:
+      - "{{ .Env.DOCKER_IMAGE_REPO }}"
+    tags:
+      - "{{ .Version }}"
+      - "{{ .Major }}.{{ .Minor }}"
+      - "{{ .Major }}"
+      - latest
+    platforms:
+      - linux/386
+      - linux/amd64
+      - linux/arm64
+    build_args:
+      USE_GORELEASER_ARTIFACTS: "1"
+    extra_files:
+      - ./
+
+winget:
+  - name: goplus
+    homepage: "https://xgo.dev/"
+    publisher: goplus
+    publisher_url: https://github.com/goplus/xgo
+    publisher_support_url: "https://github.com/goplus/xgo/issues/new"
+    package_identifier: goplus.xgo
+    path: "manifests/g/goplus/xgo/{{.Version}}"
+    tags:
+      - golang
+      - go
+      - xgo
+      - goplus
+      - programming
+      - language
+      - compiler
+      - interpreter
+      - data science
+      - engineering
+      - education
+    short_description: The XGo Programming Language
+    description: |
+      The XGo programming language is designed for engineering, STEM education, and data science.
+      - For engineering: working in the simplest language that can be mastered by children.
+      - For STEM education: studying an engineering language that can be used for work in the future.
+      - For data science: communicating with engineers in the same language.
+    license: Apache-2.0
+    skip_upload: auto
+    release_notes: "{{.Changelog}}"
+    release_notes_url: "https://github.com/{{ .Env.GITHUB_REPOSITORY_OWNER }}/xgo/releases/tag/v{{.Version}}"
+    dependencies:
+      - package_identifier: GoLang.Go
+        minimum_version: 1.18.0
+    repository:
+      owner: goplus
+      name: winget-pkgs
+      branch: "{{.ProjectName}}-v{{.Version}}"
+      git:
+        url: "git@github.com:{{ .Env.GITHUB_REPOSITORY_OWNER }}/winget-pkgs.git"
+        private_key: "{{ .Env.WINGET_PKGS_PRIVATE_KEY }}"
+      pull_request:
+        enabled: true
+        draft: true
+        base:
+          owner: microsoft
+          name: winget-pkgs
+          branch: master
+
+nfpms:
+  - package_name: xgo
+    vendor: goplus
+    homepage: https://xgo.dev/
+    maintainer: Li Jie <cpunion@gmail.com>
+    license: Apache-2.0
+    description: |
+      The XGo programming language is designed for engineering, STEM education, and data science.
+      - For engineering: working in the simplest language that can be mastered by children.
+      - For STEM education: studying an engineering language that can be used for work in the future.
+      - For data science: communicating with engineers in the same language.
+    formats:
+      - "deb"
+      - "rpm"
+    overrides:
+      deb:
+        dependencies:
+          - "golang-go (>= 1.18.0)"
+      rpm:
+        dependencies:
+          - "golang-bin >= 1.18.0"
+    file_name_template: >-
+      {{ .ProjectName }}{{.Version}}.{{ .Os }}-{{ .Arch }}
+      {{- if .Arm }}v{{ .Arm }}{{ end }}
+    bindir: /usr/lib/{{ .ProjectName }}
+    contents:
+      # source folder
+      - src: "CLAUDE.md"
+        dst: "/usr/lib/{{ .ProjectName }}/CLAUDE.md"
+      - src: "CODE_OF_CONDUCT.md"
+        dst: "/usr/lib/{{ .ProjectName }}/CODE_OF_CONDUCT.md"
+      - src: "Dockerfile"
+        dst: "/usr/lib/{{ .ProjectName }}/Dockerfile"
+      - src: "LICENSE"
+        dst: "/usr/lib/{{ .ProjectName }}/LICENSE"
+      - src: "Makefile"
+        dst: "/usr/lib/{{ .ProjectName }}/Makefile"
+      - src: "README.md"
+        dst: "/usr/lib/{{ .ProjectName }}/README.md"
+      - src: "all.bash"
+        dst: "/usr/lib/{{ .ProjectName }}/all.bash"
+      - src: "all.bat"
+        dst: "/usr/lib/{{ .ProjectName }}/all.bat"
+      - src: "ast"
+        dst: "/usr/lib/{{ .ProjectName }}/ast"
+      - src: "tpl"
+        dst: "/usr/lib/{{ .ProjectName }}/tpl"
+      - src: "dql"
+        dst: "/usr/lib/{{ .ProjectName }}/dql"
+      - src: "tool"
+        dst: "/usr/lib/{{ .ProjectName }}/tool"
+      - src: "builtin"
+        dst: "/usr/lib/{{ .ProjectName }}/builtin"
+      - src: "cl"
+        dst: "/usr/lib/{{ .ProjectName }}/cl"
+      - src: "cmd"
+        dst: "/usr/lib/{{ .ProjectName }}/cmd"
+      - src: "doc"
+        dst: "/usr/lib/{{ .ProjectName }}/doc"
+      - src: "encoding"
+        dst: "/usr/lib/{{ .ProjectName }}/encoding"
+      - src: "env"
+        dst: "/usr/lib/{{ .ProjectName }}/env"
+      - src: "format"
+        dst: "/usr/lib/{{ .ProjectName }}/format"
+      - src: "go.mod"
+        dst: "/usr/lib/{{ .ProjectName }}/go.mod"
+      - src: "go.sum"
+        dst: "/usr/lib/{{ .ProjectName }}/go.sum"
+      - src: "make.bash"
+        dst: "/usr/lib/{{ .ProjectName }}/make.bash"
+      - src: "make.bat"
+        dst: "/usr/lib/{{ .ProjectName }}/make.bat"
+      - src: "parser"
+        dst: "/usr/lib/{{ .ProjectName }}/parser"
+      - src: "printer"
+        dst: "/usr/lib/{{ .ProjectName }}/printer"
+      - src: "scanner"
+        dst: "/usr/lib/{{ .ProjectName }}/scanner"
+      - src: "test"
+        dst: "/usr/lib/{{ .ProjectName }}/test"
+      - src: "demo"
+        dst: "/usr/lib/{{ .ProjectName }}/demo"
+      - src: "token"
+        dst: "/usr/lib/{{ .ProjectName }}/token"
+      - src: "x"
+        dst: "/usr/lib/{{ .ProjectName }}/x"
+      # symlinks to binaries
+      - src: "/usr/lib/{{ .ProjectName }}/bin/xgo"
+        dst: /usr/bin/xgo
+        type: symlink
+      - src: "/usr/lib/{{ .ProjectName }}/bin/xgo"
+        dst: /usr/bin/gop
+        type: symlink
+
+snapcrafts:
+  - id: xgo
+    name: xgo
+    title: The XGo Programming Language
+    summary: The XGo Programming Language
+    description: |
+      The XGo programming language is designed for engineering, STEM education, and data science.
+      - For engineering: working in the simplest language that can be mastered by children.
+      - For STEM education: studying an engineering language that can be used for work in the future.
+      - For data science: communicating with engineers in the same language.
+    confinement: classic
+    license: Apache-2.0
+    name_template: >-
+      {{ .ProjectName }}{{.Version}}.{{ .Os }}-{{ .Arch }}
+      {{- if .Arm }}v{{ .Arm }}{{ end }}
+    extra_files:
+      # source folder
+      - source: "CLAUDE.md"
+        destination: "CLAUDE.md"
+      - source: "CODE_OF_CONDUCT.md"
+        destination: "CODE_OF_CONDUCT.md"
+      - source: "Dockerfile"
+        destination: "Dockerfile"
+      - source: "LICENSE"
+        destination: "LICENSE"
+      - source: "Makefile"
+        destination: "Makefile"
+      - source: "README.md"
+        destination: "README.md"
+      - source: "all.bash"
+        destination: "all.bash"
+      - source: "all.bat"
+        destination: "all.bat"
+      - source: "ast"
+        destination: "ast"
+      - source: "tpl"
+        destination: "tpl"
+      - source: "dql"
+        destination: "dql"
+      - source: "tool"
+        destination: "tool"
+      - source: "builtin"
+        destination: "builtin"
+      - source: "cl"
+        destination: "cl"
+      - source: "cmd"
+        destination: "cmd"
+      - source: "doc"
+        destination: "doc"
+      - source: "encoding"
+        destination: "encoding"
+      - source: "env"
+        destination: "env"
+      - source: "format"
+        destination: "format"
+      - source: "go.mod"
+        destination: "go.mod"
+      - source: "go.sum"
+        destination: "go.sum"
+      - source: "make.bash"
+        destination: "make.bash"
+      - source: "make.bat"
+        destination: "make.bat"
+      - source: "parser"
+        destination: "parser"
+      - source: "printer"
+        destination: "printer"
+      - source: "scanner"
+        destination: "scanner"
+      - source: "test"
+        destination: "test"
+      - source: "demo"
+        destination: "demo"
+      - source: "token"
+        destination: "token"
+      - source: "x"
+        destination: "x"
+    apps:
+      xgo:
+        command: "xgo"
+        aliases: ["xgo", "gop"]
+        environment:
+          XGOROOT: "$SNAP"
+
+checksum:
+  name_template: "{{ .ProjectName }}{{ .Version }}.checksums.txt"
+
+release:
+  prerelease: auto

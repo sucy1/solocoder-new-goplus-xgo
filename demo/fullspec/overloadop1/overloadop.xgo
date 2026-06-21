@@ -1,0 +1,45 @@
+type foo struct {
+}
+
+func (a foo) + (b foo) (ret foo) {
+	echo "a + b"
+	return
+}
+
+func (a foo) - (b foo) (ret foo) {
+	echo "a - b"
+	return
+}
+
+func (a foo) -> (b foo) {
+	echo "a -> b"
+}
+
+func (a foo) <> (b foo) {
+	echo "a <> b"
+}
+
+func -(a foo) (ret foo) {
+	echo "-a"
+	return
+}
+
+func ++(a foo) {
+	echo "a++"
+}
+
+func (a foo) != (b foo) bool {
+	echo "a != b"
+	return true
+}
+
+var a, b foo
+var c = a + b
+var d = a - b
+var e = -a
+var f = a != b
+
+echo f
+a++
+a -> b
+a <> b
