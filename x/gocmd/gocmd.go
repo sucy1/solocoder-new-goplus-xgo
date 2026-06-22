@@ -17,7 +17,9 @@
 package gocmd
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -78,12 +80,14 @@ func doWithArgs(dir, op string, conf *Config, args ...string) (err error) {
 func setupEnv(dir string, args []string) []string {
 	env := os.Environ()
 
-	if goos := getFlagValue(args, "GOOS"); goos == "" {
+	goos := getFlagValue(args, "GOOS")
+	if goos == "" {
 		goos = os.Getenv("GOOS")
 	} else {
 		env = setEnv(env, "GOOS", goos)
 	}
-	if goarch := getFlagValue(args, "GOARCH"); goarch == "" {
+	goarch := getFlagValue(args, "GOARCH")
+	if goarch == "" {
 		goarch = os.Getenv("GOARCH")
 	} else {
 		env = setEnv(env, "GOARCH", goarch)
@@ -217,12 +221,89 @@ func autoModDownload(dir string, conf *Config, args []string) error {
 		}
 		downloadCmd := exec.Command(goCmd, "mod", "download")
 		downloadCmd.Dir = dir
-		downloadCmd.Stderr = os.Stderr
+		var stderrBuf bytes.Buffer
+		downloadCmd.Stderr = io.MultiWriter(&stderrBuf, os.Stderr)
 		downloadCmd.Stdout = os.Stdout
-		return downloadCmd.Run()
+		err = downloadCmd.Run()
+		if err != nil {
+			stderrOutput := stderrBuf.String()
+			if isAuthError(stderrOutput) {
+				modPath := getModulePath(dir)
+				fmt.Fprintln(os.Stderr)
+				fmt.Fprintln(os.Stderr, "======================================================================")
+				fmt.Fprintln(os.Stderr, "  提示：检测到私有仓库认证失败")
+				fmt.Fprintln(os.Stderr, "======================================================================")
+				fmt.Fprintln(os.Stderr, "  原因：访问私有 Git 仓库需要认证")
+				fmt.Fprintln(os.Stderr)
+				fmt.Fprintln(os.Stderr, "  解决方案：")
+				if modPath != "" {
+					fmt.Fprintf(os.Stderr, "  1. 设置 GOPRIVATE 环境变量：\n")
+					fmt.Fprintf(os.Stderr, "     go env -w GOPRIVATE=%s\n", getPrivateRepoPrefix(modPath, stderrOutput))
+					fmt.Fprintln(os.Stderr, "     或者使用通配符：")
+					fmt.Fprintf(os.Stderr, "     go env -w GOPRIVATE=%s\n", getPrivateRepoPrefix(modPath, stderrOutput))
+				} else {
+					fmt.Fprintln(os.Stderr, "  1. 设置 GOPRIVATE 环境变量：")
+					fmt.Fprintln(os.Stderr, "     go env -w GOPRIVATE=your.private.repo.com")
+				}
+				fmt.Fprintln(os.Stderr)
+				fmt.Fprintln(os.Stderr, "  2. 配置 Git 认证凭据：")
+				fmt.Fprintln(os.Stderr, "     - HTTPS: git config --global credential.helper store")
+				fmt.Fprintln(os.Stderr, "     - SSH:   确保 ~/.ssh/id_rsa 已添加到 Git 账户")
+				fmt.Fprintln(os.Stderr, "     - 或者使用个人访问令牌 (PAT)")
+				fmt.Fprintln(os.Stderr, "======================================================================")
+				fmt.Fprintln(os.Stderr)
+			}
+		}
+		return err
 	}
 
 	return nil
+}
+
+func isAuthError(stderr string) bool {
+	authPatterns := []string{
+		"could not read Username",
+		"terminal prompts disabled",
+		"invalid username or password",
+		"401 Unauthorized",
+		"403 Forbidden",
+		"Authentication required",
+		"Permission denied",
+		"Host key verification failed",
+		"repository not found",
+		"fatal: Authentication failed",
+		"x509: certificate signed by unknown authority",
+	}
+	for _, pattern := range authPatterns {
+		if strings.Contains(stderr, pattern) {
+			return true
+		}
+	}
+	return false
+}
+
+func getModulePath(dir string) string {
+	goModPath := filepath.Join(dir, "go.mod")
+	data, err := os.ReadFile(goModPath)
+	if err != nil {
+		return ""
+	}
+	lines := strings.Split(string(data), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "module ") {
+			return strings.TrimPrefix(line, "module ")
+		}
+	}
+	return ""
+}
+
+func getPrivateRepoPrefix(modPath, stderr string) string {
+	parts := strings.Split(modPath, "/")
+	if len(parts) >= 2 {
+		return parts[0] + "/*"
+	}
+	return modPath
 }
 
 func runCmd(cmd *exec.Cmd) (err error) {

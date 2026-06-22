@@ -122,7 +122,17 @@ func generateCoverHTML(conf *gocmd.TestConfig) {
 		return
 	}
 
-	if _, err := os.Stat(coverProfile); os.IsNotExist(err) {
+	profilePath := coverProfile
+	if conf.Dir != "" && !filepath.IsAbs(coverProfile) {
+		profilePath = filepath.Join(conf.Dir, coverProfile)
+	}
+
+	if _, err := os.Stat(profilePath); os.IsNotExist(err) {
+		return
+	}
+
+	if isCoverageEmpty(profilePath) {
+		fmt.Fprintln(os.Stderr, "coverage: no coverage data collected (no tests executed or all tests skipped)")
 		return
 	}
 
@@ -138,6 +148,29 @@ func generateCoverHTML(conf *gocmd.TestConfig) {
 	if err := htmlCmd.Run(); err == nil {
 		fmt.Fprintf(os.Stderr, "coverage report: %s\n", htmlPath)
 	}
+}
+
+func isCoverageEmpty(profilePath string) bool {
+	data, err := os.ReadFile(profilePath)
+	if err != nil {
+		return true
+	}
+	content := string(data)
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return true
+	}
+	lines := strings.Split(content, "\n")
+	hasCoverage := false
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "mode:") {
+			continue
+		}
+		hasCoverage = true
+		break
+	}
+	return !hasCoverage
 }
 
 func test(proj xgoprojs.Proj, conf *tool.Config, test *gocmd.TestConfig) {

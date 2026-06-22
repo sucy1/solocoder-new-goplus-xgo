@@ -305,22 +305,41 @@ type concurrencyChecker struct {
 	fset     *token.FileSet
 	typesPkg *types.Package
 	onErr    func(error)
+	info     *types.Info
 
-	sharedVars    map[string]bool
-	sharedMaps    map[string]bool
-	mutexVars     map[string]bool
-	inGoStmt      bool
-	lockDepth     int
+	sharedVars     map[string]bool
+	sharedMaps     map[string]bool
+	syncMapVars    map[string]bool
+	mutexVars      map[string]bool
+	mutexPaths     map[string]bool
+	waitGroupVars  map[string]bool
+	onceVars       map[string]bool
+	condVars       map[string]bool
+	chanVars       map[string]bool
+	inGoStmt       bool
+	lockDepth      int
+	pendingUnlocks []deferredUnlock
+}
+
+type deferredUnlock struct {
+	lockIdent string
+	pos       token.Pos
 }
 
 func newConcurrencyChecker(fset *token.FileSet, pkg *types.Package, onErr func(error)) *concurrencyChecker {
 	c := &concurrencyChecker{
-		fset:       fset,
-		typesPkg:   pkg,
-		onErr:      onErr,
-		sharedVars: make(map[string]bool),
-		sharedMaps: make(map[string]bool),
-		mutexVars:  make(map[string]bool),
+		fset:          fset,
+		typesPkg:      pkg,
+		onErr:         onErr,
+		sharedVars:    make(map[string]bool),
+		sharedMaps:    make(map[string]bool),
+		syncMapVars:   make(map[string]bool),
+		mutexVars:     make(map[string]bool),
+		mutexPaths:    make(map[string]bool),
+		waitGroupVars: make(map[string]bool),
+		onceVars:      make(map[string]bool),
+		condVars:      make(map[string]bool),
+		chanVars:      make(map[string]bool),
 	}
 	c.collectSharedState()
 	return c
@@ -335,20 +354,71 @@ func (c *concurrencyChecker) collectSharedState() {
 		obj := scope.Lookup(name)
 		if vr, ok := obj.(*types.Var); ok && !vr.IsField() {
 			typ := vr.Type()
-			if isMutexType(typ) {
-				c.mutexVars[name] = true
-			} else if isMapType(typ) {
-				c.sharedMaps[name] = true
-				c.sharedVars[name] = true
-			} else {
-				c.sharedVars[name] = true
+			c.collectVarTypes(name, typ)
+		} else if tn, ok := obj.(*types.TypeName); ok {
+			if named, ok := tn.Type().(*types.Named); ok {
+				if st, ok := named.Underlying().(*types.Struct); ok {
+					c.collectStructFieldLocks(name, st)
+				}
+			}
+		}
+	}
+}
+
+func (c *concurrencyChecker) collectVarTypes(name string, typ types.Type) {
+	switch {
+	case isMutexType(typ):
+		c.mutexVars[name] = true
+		c.mutexPaths[name] = true
+	case isSyncMapType(typ):
+		c.syncMapVars[name] = true
+		c.sharedVars[name] = true
+	case isWaitGroupType(typ):
+		c.waitGroupVars[name] = true
+	case isOnceType(typ):
+		c.onceVars[name] = true
+	case isCondType(typ):
+		c.condVars[name] = true
+	case isChanType(typ):
+		c.chanVars[name] = true
+	case isMapType(typ):
+		c.sharedMaps[name] = true
+		c.sharedVars[name] = true
+	default:
+		c.sharedVars[name] = true
+	}
+}
+
+func (c *concurrencyChecker) collectStructFieldLocks(typeName string, st *types.Struct) {
+	for i := 0; i < st.NumFields(); i++ {
+		field := st.Field(i)
+		fieldName := field.Name()
+		typ := field.Type()
+
+		fullPath := typeName + "." + fieldName
+		switch {
+		case isMutexType(typ):
+			c.mutexPaths[fullPath] = true
+		case isSyncMapType(typ):
+			c.syncMapVars[fullPath] = true
+		}
+
+		if ptr, ok := typ.(*types.Pointer); ok {
+			if named, ok := ptr.Elem().(*types.Named); ok {
+				if st2, ok := named.Underlying().(*types.Struct); ok {
+					c.collectStructFieldLocks(fullPath, st2)
+				}
+			}
+		} else if named, ok := typ.(*types.Named); ok {
+			if st2, ok := named.Underlying().(*types.Struct); ok {
+				c.collectStructFieldLocks(fullPath, st2)
 			}
 		}
 	}
 }
 
 func isMutexType(typ types.Type) bool {
-	named, ok := typ.(*types.Named)
+	named, ok := getUnderlyingNamed(typ)
 	if !ok {
 		return false
 	}
@@ -366,8 +436,75 @@ func isMutexType(typ types.Type) bool {
 	return false
 }
 
+func isSyncMapType(typ types.Type) bool {
+	named, ok := getUnderlyingNamed(typ)
+	if !ok {
+		return false
+	}
+	obj := named.Obj()
+	if obj == nil || obj.Pkg() == nil {
+		return false
+	}
+	return obj.Pkg().Path() == "sync" && obj.Name() == "Map"
+}
+
+func isWaitGroupType(typ types.Type) bool {
+	named, ok := getUnderlyingNamed(typ)
+	if !ok {
+		return false
+	}
+	obj := named.Obj()
+	if obj == nil || obj.Pkg() == nil {
+		return false
+	}
+	return obj.Pkg().Path() == "sync" && obj.Name() == "WaitGroup"
+}
+
+func isOnceType(typ types.Type) bool {
+	named, ok := getUnderlyingNamed(typ)
+	if !ok {
+		return false
+	}
+	obj := named.Obj()
+	if obj == nil || obj.Pkg() == nil {
+		return false
+	}
+	return obj.Pkg().Path() == "sync" && obj.Name() == "Once"
+}
+
+func isCondType(typ types.Type) bool {
+	named, ok := getUnderlyingNamed(typ)
+	if !ok {
+		return false
+	}
+	obj := named.Obj()
+	if obj == nil || obj.Pkg() == nil {
+		return false
+	}
+	return obj.Pkg().Path() == "sync" && obj.Name() == "Cond"
+}
+
+func getUnderlyingNamed(typ types.Type) (*types.Named, bool) {
+	if ptr, ok := typ.(*types.Pointer); ok {
+		return getUnderlyingNamed(ptr.Elem())
+	}
+	named, ok := typ.(*types.Named)
+	return named, ok
+}
+
 func isMapType(typ types.Type) bool {
+	if ptr, ok := typ.(*types.Pointer); ok {
+		return isMapType(ptr.Elem())
+	}
 	_, ok := typ.Underlying().(*types.Map)
+	return ok
+}
+
+func isChanType(typ types.Type) bool {
+	if ptr, ok := typ.(*types.Pointer); ok {
+		return isChanType(ptr.Elem())
+	}
+	_, ok := typ.Underlying().(*types.Chan)
 	return ok
 }
 
@@ -385,11 +522,19 @@ func (c *concurrencyChecker) visitGoNode(n goast.Node) bool {
 	case *goast.GoStmt:
 		c.inGoStmt = true
 		oldLockDepth := c.lockDepth
+		oldUnlocks := c.pendingUnlocks
 		c.lockDepth = 0
+		c.pendingUnlocks = nil
 		goast.Inspect(v.Call, c.visitGoNodeInGoroutine)
+		c.applyDeferredUnlocks()
 		c.inGoStmt = false
 		c.lockDepth = oldLockDepth
+		c.pendingUnlocks = oldUnlocks
 		return false
+
+	case *goast.DeferStmt:
+		c.handleDeferUnlock(v)
+		return true
 
 	case *goast.AssignStmt:
 		for _, lhs := range v.Lhs {
@@ -404,6 +549,8 @@ func (c *concurrencyChecker) visitGoNode(n goast.Node) bool {
 
 	case *goast.CallExpr:
 		c.handleLockCall(v)
+		c.checkSyncMapAccess(v)
+		c.checkSharedVarMethodCall(v)
 	}
 	return true
 }
@@ -423,6 +570,14 @@ func (c *concurrencyChecker) visitGoNodeInGoroutine(n goast.Node) bool {
 
 	case *goast.CallExpr:
 		c.handleLockCall(v)
+		c.checkSyncMapAccess(v)
+		c.checkSharedVarMethodCall(v)
+
+	case *goast.DeferStmt:
+		c.handleDeferUnlock(v)
+
+	case *goast.SelectorExpr:
+		c.checkSharedVarSelectorAccess(v)
 
 	case *goast.Ident:
 		if c.sharedVars[v.Name] && c.lockDepth == 0 {
@@ -438,10 +593,14 @@ func (c *concurrencyChecker) visitXGoNode(n ast.Node) bool {
 	case *ast.GoStmt:
 		c.inGoStmt = true
 		oldLockDepth := c.lockDepth
+		oldUnlocks := c.pendingUnlocks
 		c.lockDepth = 0
+		c.pendingUnlocks = nil
 		ast.Inspect(v.Call, c.visitXGoNodeInGoroutine)
+		c.applyDeferredUnlocks()
 		c.inGoStmt = false
 		c.lockDepth = oldLockDepth
+		c.pendingUnlocks = oldUnlocks
 		return false
 	}
 	return true
@@ -455,10 +614,45 @@ func (c *concurrencyChecker) checkSharedVarWrite(expr goast.Expr) {
 	if !c.inGoStmt || c.lockDepth > 0 {
 		return
 	}
-	if id, ok := expr.(*goast.Ident); ok {
-		if c.sharedVars[id.Name] {
-			c.reportError(id.Pos(), UnsynchronizedSharedVar,
-				fmt.Sprintf("shared variable %s modified in goroutine without synchronization", id.Name))
+
+	varName := c.getVarName(expr)
+	if varName != "" && c.sharedVars[varName] {
+		c.reportError(expr.Pos(), UnsynchronizedSharedVar,
+			fmt.Sprintf("shared variable %s modified in goroutine without synchronization", varName))
+	}
+
+	c.checkFieldWrite(expr)
+}
+
+func (c *concurrencyChecker) checkSharedVarSelectorAccess(sel *goast.SelectorExpr) {
+	if !c.inGoStmt || c.lockDepth > 0 {
+		return
+	}
+	varName := c.getVarName(sel.X)
+	if varName != "" && c.sharedVars[varName] {
+		c.reportError(sel.Pos(), UnsynchronizedSharedVar,
+			fmt.Sprintf("shared variable %s accessed in goroutine without synchronization", varName))
+	}
+}
+
+func (c *concurrencyChecker) getVarName(expr goast.Expr) string {
+	switch v := expr.(type) {
+	case *goast.Ident:
+		return v.Name
+	case *goast.StarExpr:
+		return c.getVarName(v.X)
+	case *goast.ParenExpr:
+		return c.getVarName(v.X)
+	}
+	return ""
+}
+
+func (c *concurrencyChecker) checkFieldWrite(expr goast.Expr) {
+	if sel, ok := expr.(*goast.SelectorExpr); ok {
+		varName := c.getVarName(sel.X)
+		if varName != "" && c.sharedVars[varName] {
+			c.reportError(sel.Pos(), UnsynchronizedSharedVar,
+				fmt.Sprintf("shared variable %s.%s modified in goroutine without synchronization", varName, sel.Sel.Name))
 		}
 	}
 }
@@ -467,12 +661,47 @@ func (c *concurrencyChecker) checkSharedMapAccess(expr *goast.IndexExpr) {
 	if !c.inGoStmt || c.lockDepth > 0 {
 		return
 	}
-	if id, ok := expr.X.(*goast.Ident); ok {
-		if c.sharedMaps[id.Name] {
-			c.reportError(id.Pos(), UnsynchronizedMapAccess,
-				fmt.Sprintf("shared map %s accessed in goroutine without synchronization", id.Name))
+	varName := c.getVarName(expr.X)
+	if varName != "" && c.sharedMaps[varName] {
+		c.reportError(expr.Pos(), UnsynchronizedMapAccess,
+			fmt.Sprintf("shared map %s accessed in goroutine without synchronization", varName))
+	}
+
+	if sel, ok := expr.X.(*goast.SelectorExpr); ok {
+		fullPath := c.getFullSelectorPath(sel)
+		if fullPath != "" && c.isProtectedByLock(fullPath) {
+			return
+		}
+		mapName := c.getVarName(sel.X)
+		if mapName != "" && c.sharedMaps[mapName] {
+			c.reportError(expr.Pos(), UnsynchronizedMapAccess,
+				fmt.Sprintf("shared map %s.%s accessed in goroutine without synchronization", mapName, sel.Sel.Name))
 		}
 	}
+}
+
+func (c *concurrencyChecker) getFullSelectorPath(sel *goast.SelectorExpr) string {
+	var parts []string
+	current := goast.Expr(sel)
+	for {
+		if s, ok := current.(*goast.SelectorExpr); ok {
+			parts = append([]string{s.Sel.Name}, parts...)
+			current = s.X
+		} else if id, ok := current.(*goast.Ident); ok {
+			parts = append([]string{id.Name}, parts...)
+			break
+		} else {
+			return ""
+		}
+	}
+	return strings.Join(parts, ".")
+}
+
+func (c *concurrencyChecker) isProtectedByLock(varPath string) bool {
+	if c.lockDepth > 0 {
+		return true
+	}
+	return false
 }
 
 func (c *concurrencyChecker) handleLockCall(call *goast.CallExpr) {
@@ -480,10 +709,12 @@ func (c *concurrencyChecker) handleLockCall(call *goast.CallExpr) {
 	if !ok {
 		return
 	}
-	recv, ok := sel.X.(*goast.Ident)
-	if !ok || !c.mutexVars[recv.Name] {
+
+	lockIdent := c.getLockIdentifier(sel.X)
+	if lockIdent == "" {
 		return
 	}
+
 	switch sel.Sel.Name {
 	case "Lock", "RLock":
 		c.lockDepth++
@@ -491,6 +722,103 @@ func (c *concurrencyChecker) handleLockCall(call *goast.CallExpr) {
 		if c.lockDepth > 0 {
 			c.lockDepth--
 		}
+	}
+}
+
+func (c *concurrencyChecker) handleDeferUnlock(deferStmt *goast.DeferStmt) {
+	call := deferStmt.Call
+	sel, ok := call.Fun.(*goast.SelectorExpr)
+	if !ok {
+		return
+	}
+	if sel.Sel.Name == "Unlock" || sel.Sel.Name == "RUnlock" {
+		lockIdent := c.getLockIdentifier(sel.X)
+		if lockIdent != "" {
+			c.pendingUnlocks = append(c.pendingUnlocks, deferredUnlock{
+				lockIdent: lockIdent,
+				pos:       deferStmt.Pos(),
+			})
+		}
+	}
+}
+
+func (c *concurrencyChecker) applyDeferredUnlocks() {
+	for range c.pendingUnlocks {
+		if c.lockDepth > 0 {
+			c.lockDepth--
+		}
+	}
+	c.pendingUnlocks = nil
+}
+
+func (c *concurrencyChecker) getLockIdentifier(expr goast.Expr) string {
+	switch v := expr.(type) {
+	case *goast.Ident:
+		if c.mutexVars[v.Name] {
+			return v.Name
+		}
+		fullPath := v.Name
+		if c.mutexPaths[fullPath] {
+			return fullPath
+		}
+	case *goast.SelectorExpr:
+		fullPath := c.getFullSelectorPath(v)
+		if fullPath != "" && (c.mutexVars[fullPath] || c.mutexPaths[fullPath]) {
+			return fullPath
+		}
+		if id, ok := v.X.(*goast.Ident); ok {
+			if c.mutexVars[id.Name+"."+v.Sel.Name] || c.mutexPaths[id.Name+"."+v.Sel.Name] {
+				return id.Name + "." + v.Sel.Name
+			}
+			if c.mutexVars[id.Name] || c.mutexPaths[id.Name] {
+				return id.Name
+			}
+		}
+	case *goast.StarExpr:
+		return c.getLockIdentifier(v.X)
+	}
+	return ""
+}
+
+func (c *concurrencyChecker) checkSyncMapAccess(call *goast.CallExpr) {
+	if !c.inGoStmt || c.lockDepth > 0 {
+		return
+	}
+	sel, ok := call.Fun.(*goast.SelectorExpr)
+	if !ok {
+		return
+	}
+
+	recvPath := c.getFullSelectorPath(sel)
+	recvName := c.getVarName(sel.X)
+	varName := ""
+	if recvName != "" && c.syncMapVars[recvName] {
+		varName = recvName
+	} else if recvPath != "" && c.syncMapVars[recvPath] {
+		varName = recvPath
+	}
+
+	if varName != "" {
+		switch sel.Sel.Name {
+		case "Load", "Store", "Delete", "LoadOrStore", "LoadAndDelete", "Range", "CompareAndSwap", "CompareAndDelete", "Swap":
+			c.reportError(call.Pos(), UnsynchronizedMapAccess,
+				fmt.Sprintf("sync.Map %s accessed in goroutine via %s (sync.Map is concurrency-safe, but check usage)", varName, sel.Sel.Name))
+		}
+	}
+}
+
+func (c *concurrencyChecker) checkSharedVarMethodCall(call *goast.CallExpr) {
+	if !c.inGoStmt || c.lockDepth > 0 {
+		return
+	}
+	sel, ok := call.Fun.(*goast.SelectorExpr)
+	if !ok {
+		return
+	}
+	recvName := c.getVarName(sel.X)
+	if recvName != "" && c.sharedVars[recvName] {
+		c.reportError(call.Pos(), UnsynchronizedSharedVar,
+			fmt.Sprintf("shared variable %s method %s called in goroutine without synchronization", recvName, sel.Sel.Name))
 	}
 }
 
