@@ -79,15 +79,16 @@ func runCmd(cmd *base.Command, args []string) {
 	defer conf.UpdateCache()
 
 	confCmd := conf.NewGoCmdConf()
-	confCmd.Flags = processCoverFlags(pass.Args)
+	var coverAutoAdded bool
+	confCmd.Flags, coverAutoAdded = processCoverFlags(pass.Args)
 	for _, proj := range projs {
 		test(proj, conf, confCmd)
 	}
 
-	generateCoverHTML(confCmd)
+	generateCoverHTML(confCmd, coverAutoAdded)
 }
 
-func processCoverFlags(args []string) []string {
+func processCoverFlags(args []string) ([]string, bool) {
 	hasCover := false
 	hasCoverProfile := false
 	for _, arg := range args {
@@ -98,13 +99,15 @@ func processCoverFlags(args []string) []string {
 			hasCoverProfile = true
 		}
 	}
+	autoAdded := false
 	if hasCover && !hasCoverProfile {
 		args = append(args, "-coverprofile=coverage.out")
+		autoAdded = true
 	}
-	return args
+	return args, autoAdded
 }
 
-func generateCoverHTML(conf *gocmd.TestConfig) {
+func generateCoverHTML(conf *gocmd.TestConfig, coverAutoAdded bool) {
 	if conf == nil {
 		return
 	}
@@ -132,7 +135,9 @@ func generateCoverHTML(conf *gocmd.TestConfig) {
 	}
 
 	if isCoverageEmpty(profilePath) {
-		fmt.Fprintln(os.Stderr, "coverage: no coverage data collected (no tests executed or all tests skipped)")
+		if coverAutoAdded {
+			os.Remove(profilePath)
+		}
 		return
 	}
 

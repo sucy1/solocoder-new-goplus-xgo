@@ -356,9 +356,11 @@ func (c *concurrencyChecker) collectSharedState() {
 			typ := vr.Type()
 			c.collectVarTypes(name, typ)
 		} else if tn, ok := obj.(*types.TypeName); ok {
-			if named, ok := tn.Type().(*types.Named); ok {
-				if st, ok := named.Underlying().(*types.Struct); ok {
-					c.collectStructFieldLocks(name, st)
+			if tn.Pkg() == c.typesPkg {
+				if named, ok := tn.Type().(*types.Named); ok {
+					if st, ok := named.Underlying().(*types.Struct); ok {
+						c.collectStructFieldLocks(name, st)
+					}
 				}
 			}
 		}
@@ -403,15 +405,21 @@ func (c *concurrencyChecker) collectStructFieldLocks(typeName string, st *types.
 			c.syncMapVars[fullPath] = true
 		}
 
-		if ptr, ok := typ.(*types.Pointer); ok {
-			if named, ok := ptr.Elem().(*types.Named); ok {
-				if st2, ok := named.Underlying().(*types.Struct); ok {
-					c.collectStructFieldLocks(fullPath, st2)
+		if c.typesPkg != nil {
+			if ptr, ok := typ.(*types.Pointer); ok {
+				if named, ok := ptr.Elem().(*types.Named); ok {
+					if named.Obj().Pkg() == c.typesPkg {
+						if st2, ok := named.Underlying().(*types.Struct); ok {
+							c.collectStructFieldLocks(fullPath, st2)
+						}
+					}
 				}
-			}
-		} else if named, ok := typ.(*types.Named); ok {
-			if st2, ok := named.Underlying().(*types.Struct); ok {
-				c.collectStructFieldLocks(fullPath, st2)
+			} else if named, ok := typ.(*types.Named); ok {
+				if named.Obj().Pkg() == c.typesPkg {
+					if st2, ok := named.Underlying().(*types.Struct); ok {
+						c.collectStructFieldLocks(fullPath, st2)
+					}
+				}
 			}
 		}
 	}
