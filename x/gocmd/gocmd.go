@@ -20,6 +20,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
 
 	"github.com/goplus/mod/env"
 	"github.com/goplus/xgo/x/xgoenv"
@@ -32,6 +34,7 @@ type Config struct {
 	GoCmd string
 	Flags []string
 	Run   func(cmd *exec.Cmd) error
+	Dir   string
 }
 
 // -----------------------------------------------------------------------------
@@ -49,13 +52,177 @@ func doWithArgs(dir, op string, conf *Config, args ...string) (err error) {
 	exargs = appendLdflags(exargs, conf.XGo)
 	exargs = append(exargs, conf.Flags...)
 	exargs = append(exargs, args...)
+
+	workDir := dir
+	if workDir == "" {
+		workDir = conf.Dir
+	}
+
 	cmd := exec.Command(goCmd, exargs...)
-	cmd.Dir = dir
+	cmd.Dir = workDir
+	cmd.Env = setupEnv(workDir, exargs)
+
+	if op == "build" || op == "install" || op == "test" || op == "run" {
+		if err = autoModDownload(workDir, conf, exargs); err != nil {
+			return
+		}
+	}
+
 	run := conf.Run
 	if run == nil {
 		run = runCmd
 	}
 	return run(cmd)
+}
+
+func setupEnv(dir string, args []string) []string {
+	env := os.Environ()
+
+	if goos := getFlagValue(args, "GOOS"); goos == "" {
+		goos = os.Getenv("GOOS")
+	} else {
+		env = setEnv(env, "GOOS", goos)
+	}
+	if goarch := getFlagValue(args, "GOARCH"); goarch == "" {
+		goarch = os.Getenv("GOARCH")
+	} else {
+		env = setEnv(env, "GOARCH", goarch)
+	}
+
+	if goos == "android" {
+		env = setupAndroidNDK(env, goarch)
+	}
+
+	if gocache := os.Getenv("GOCACHE"); gocache != "" {
+		env = setEnv(env, "GOCACHE", gocache)
+	}
+
+	return env
+}
+
+func getFlagValue(args []string, name string) string {
+	prefix := "-" + name + "="
+	for _, arg := range args {
+		if strings.HasPrefix(arg, prefix) {
+			return arg[len(prefix):]
+		}
+	}
+	return ""
+}
+
+func setEnv(env []string, key, value string) []string {
+	prefix := key + "="
+	for i, e := range env {
+		if strings.HasPrefix(e, prefix) {
+			env[i] = prefix + value
+			return env
+		}
+	}
+	return append(env, prefix+value)
+}
+
+func setupAndroidNDK(env []string, goarch string) []string {
+	ndkRoot := os.Getenv("ANDROID_NDK_HOME")
+	if ndkRoot == "" {
+		ndkRoot = os.Getenv("NDK_ROOT")
+	}
+	if ndkRoot == "" {
+		if home := os.Getenv("HOME"); home != "" {
+			candidates := []string{
+				filepath.Join(home, "Android", "Sdk", "ndk"),
+				filepath.Join(home, "AppData", "Local", "Android", "Sdk", "ndk"),
+				"/opt/android-ndk",
+				"/usr/local/lib/android/sdk/ndk",
+			}
+			for _, cand := range candidates {
+				if info, err := os.Stat(cand); err == nil && info.IsDir() {
+					entries, err := os.ReadDir(cand)
+					if err == nil && len(entries) > 0 {
+						ndkRoot = filepath.Join(cand, entries[0].Name())
+						break
+					}
+				}
+			}
+		}
+	}
+	if ndkRoot == "" {
+		return env
+	}
+
+	var clangPrefix string
+	switch goarch {
+	case "arm64":
+		clangPrefix = "aarch64-linux-android"
+	case "arm":
+		clangPrefix = "armv7a-linux-androideabi"
+	case "386":
+		clangPrefix = "i686-linux-android"
+	case "amd64":
+		clangPrefix = "x86_64-linux-android"
+	default:
+		clangPrefix = "aarch64-linux-android"
+	}
+
+	var toolchain string
+	if runtimeGOOS := os.Getenv("GOHOSTOS"); runtimeGOOS == "windows" || runtimeGOOS == "" {
+		if _, err := os.Stat(filepath.Join(ndkRoot, "toolchains", "llvm", "prebuilt", "windows-x86_64")); err == nil {
+			toolchain = filepath.Join(ndkRoot, "toolchains", "llvm", "prebuilt", "windows-x86_64")
+		}
+	}
+	if toolchain == "" {
+		if _, err := os.Stat(filepath.Join(ndkRoot, "toolchains", "llvm", "prebuilt", "darwin-x86_64")); err == nil {
+			toolchain = filepath.Join(ndkRoot, "toolchains", "llvm", "prebuilt", "darwin-x86_64")
+		}
+	}
+	if toolchain == "" {
+		toolchain = filepath.Join(ndkRoot, "toolchains", "llvm", "prebuilt", "linux-x86_64")
+	}
+
+	binDir := filepath.Join(toolchain, "bin")
+	cc := filepath.Join(binDir, clangPrefix+"21-clang")
+	cxx := filepath.Join(binDir, clangPrefix+"21-clang++")
+
+	env = setEnv(env, "CC", cc)
+	env = setEnv(env, "CXX", cxx)
+	env = setEnv(env, "CGO_ENABLED", "1")
+	if cgoLdflags := os.Getenv("CGO_LDFLAGS"); cgoLdflags == "" {
+		env = setEnv(env, "CGO_LDFLAGS", fmt.Sprintf("-L%s/sysroot/usr/lib/%s", toolchain, clangPrefix))
+	}
+
+	return env
+}
+
+func autoModDownload(dir string, conf *Config, args []string) error {
+	modFlag := ""
+	for _, arg := range args {
+		if strings.HasPrefix(arg, "-mod=") {
+			modFlag = arg[5:]
+			break
+		}
+	}
+	if modFlag != "mod" {
+		return nil
+	}
+
+	goModPath := filepath.Join(dir, "go.mod")
+	if _, err := os.Stat(goModPath); err != nil {
+		return nil
+	}
+
+	goSumPath := filepath.Join(dir, "go.sum")
+	if _, err := os.Stat(goSumPath); err != nil {
+		goCmd := conf.GoCmd
+		if goCmd == "" {
+			goCmd = Name()
+		}
+		downloadCmd := exec.Command(goCmd, "mod", "download")
+		downloadCmd.Dir = dir
+		downloadCmd.Stderr = os.Stderr
+		downloadCmd.Stdout = os.Stdout
+		return downloadCmd.Run()
+	}
+
+	return nil
 }
 
 func runCmd(cmd *exec.Cmd) (err error) {

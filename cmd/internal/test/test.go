@@ -21,7 +21,10 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"reflect"
+	"strings"
 
 	"github.com/goplus/gogen"
 	"github.com/goplus/xgo/cl"
@@ -76,9 +79,64 @@ func runCmd(cmd *base.Command, args []string) {
 	defer conf.UpdateCache()
 
 	confCmd := conf.NewGoCmdConf()
-	confCmd.Flags = pass.Args
+	confCmd.Flags = processCoverFlags(pass.Args)
 	for _, proj := range projs {
 		test(proj, conf, confCmd)
+	}
+
+	generateCoverHTML(confCmd)
+}
+
+func processCoverFlags(args []string) []string {
+	hasCover := false
+	hasCoverProfile := false
+	for _, arg := range args {
+		if arg == "-cover=true" || arg == "-cover" {
+			hasCover = true
+		}
+		if strings.HasPrefix(arg, "-coverprofile=") {
+			hasCoverProfile = true
+		}
+	}
+	if hasCover && !hasCoverProfile {
+		args = append(args, "-coverprofile=coverage.out")
+	}
+	return args
+}
+
+func generateCoverHTML(conf *gocmd.TestConfig) {
+	if conf == nil {
+		return
+	}
+	hasCover := false
+	coverProfile := "coverage.out"
+	for _, arg := range conf.Flags {
+		if arg == "-cover=true" || arg == "-cover" {
+			hasCover = true
+		}
+		if strings.HasPrefix(arg, "-coverprofile=") {
+			coverProfile = arg[len("-coverprofile="):]
+		}
+	}
+	if !hasCover {
+		return
+	}
+
+	if _, err := os.Stat(coverProfile); os.IsNotExist(err) {
+		return
+	}
+
+	goCmd := conf.GoCmd
+	if goCmd == "" {
+		goCmd = gocmd.Name()
+	}
+	htmlPath := strings.TrimSuffix(coverProfile, filepath.Ext(coverProfile)) + ".html"
+	htmlCmd := exec.Command(goCmd, "tool", "cover", "-html="+coverProfile, "-o", htmlPath)
+	htmlCmd.Dir = conf.Dir
+	htmlCmd.Stderr = os.Stderr
+	htmlCmd.Stdout = os.Stdout
+	if err := htmlCmd.Run(); err == nil {
+		fmt.Fprintf(os.Stderr, "coverage report: %s\n", htmlPath)
 	}
 }
 

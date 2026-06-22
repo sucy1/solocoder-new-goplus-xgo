@@ -78,6 +78,15 @@ func PassBuildFlags(cmd *Command) *PassArgs {
 		"trimpath", "work")
 	p.Var("p", "asmflags", "compiler", "buildmode",
 		"gcflags", "gccgoflags", "installsuffix",
-		"ldflags", "pkgdir", "tags", "toolexec", "buildvcs")
+		"ldflags", "pkgdir", "tags", "toolexec", "buildvcs", "mod")
 	return p
+}
+
+func (p *PassArgs) Mod() string {
+	for _, v := range p.Args {
+		if strings.HasPrefix(v, "-mod=") {
+			return v[5:]
+		}
+	}
+	return ""
 }

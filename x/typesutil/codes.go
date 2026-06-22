@@ -1494,4 +1494,28 @@ const (
 	// errors. The solution is to rebuild the application with a
 	// newer Go release.
 	TooNew
+
+	// UnsynchronizedSharedVar occurs when a package-level shared variable
+	// is accessed or modified within a goroutine without proper synchronization.
+	//
+	// Example:
+	//  var counter int
+	//  func f() {
+	//  	go func() {
+	//  		counter++
+	//  	}()
+	//  }
+	UnsynchronizedSharedVar
+
+	// UnsynchronizedMapAccess occurs when a shared map is accessed
+	// from multiple goroutines without synchronization primitives.
+	//
+	// Example:
+	//  var m = make(map[string]int)
+	//  func f() {
+	//  	go func() {
+	//  		m["key"] = 1
+	//  	}()
+	//  }
+	UnsynchronizedMapAccess
 )

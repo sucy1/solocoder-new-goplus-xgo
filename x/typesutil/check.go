@@ -17,6 +17,7 @@
 package typesutil
 
 import (
+	"fmt"
 	goast "go/ast"
 	"go/types"
 	"path/filepath"
@@ -207,6 +208,10 @@ func (p *Checker) Files(goFiles []*goast.File, xgoFiles []*ast.File) (err error)
 			gogen.InitXGoPackage(pkgTypes)
 		}
 	}
+
+	if origError != nil {
+		checkConcurrencySafety(fset, pkgTypes, goFiles, xgoFiles, origError)
+	}
 	return
 }
 
@@ -290,4 +295,219 @@ func scopeDelete(objMap map[types.Object]types.Object, scope *types.Scope, name 
 	if o := typesutil.ScopeDelete(scope, name); o != nil {
 		objMap[o] = nil
 	}
+}
+
+// -----------------------------------------------------------------------------
+// Concurrency safety checks
+// -----------------------------------------------------------------------------
+
+type concurrencyChecker struct {
+	fset     *token.FileSet
+	typesPkg *types.Package
+	onErr    func(error)
+
+	sharedVars    map[string]bool
+	sharedMaps    map[string]bool
+	mutexVars     map[string]bool
+	inGoStmt      bool
+	lockDepth     int
+}
+
+func newConcurrencyChecker(fset *token.FileSet, pkg *types.Package, onErr func(error)) *concurrencyChecker {
+	c := &concurrencyChecker{
+		fset:       fset,
+		typesPkg:   pkg,
+		onErr:      onErr,
+		sharedVars: make(map[string]bool),
+		sharedMaps: make(map[string]bool),
+		mutexVars:  make(map[string]bool),
+	}
+	c.collectSharedState()
+	return c
+}
+
+func (c *concurrencyChecker) collectSharedState() {
+	if c.typesPkg == nil {
+		return
+	}
+	scope := c.typesPkg.Scope()
+	for _, name := range scope.Names() {
+		obj := scope.Lookup(name)
+		if vr, ok := obj.(*types.Var); ok && !vr.IsField() {
+			typ := vr.Type()
+			if isMutexType(typ) {
+				c.mutexVars[name] = true
+			} else if isMapType(typ) {
+				c.sharedMaps[name] = true
+				c.sharedVars[name] = true
+			} else {
+				c.sharedVars[name] = true
+			}
+		}
+	}
+}
+
+func isMutexType(typ types.Type) bool {
+	named, ok := typ.(*types.Named)
+	if !ok {
+		return false
+	}
+	obj := named.Obj()
+	if obj == nil || obj.Pkg() == nil {
+		return false
+	}
+	pkgPath := obj.Pkg().Path()
+	typeName := obj.Name()
+	if pkgPath == "sync" {
+		if typeName == "Mutex" || typeName == "RWMutex" {
+			return true
+		}
+	}
+	return false
+}
+
+func isMapType(typ types.Type) bool {
+	_, ok := typ.Underlying().(*types.Map)
+	return ok
+}
+
+func (c *concurrencyChecker) CheckFiles(goFiles []*goast.File, xgoFiles []*ast.File) {
+	for _, f := range goFiles {
+		goast.Inspect(f, c.visitGoNode)
+	}
+	for _, f := range xgoFiles {
+		ast.Inspect(f, c.visitXGoNode)
+	}
+}
+
+func (c *concurrencyChecker) visitGoNode(n goast.Node) bool {
+	switch v := n.(type) {
+	case *goast.GoStmt:
+		c.inGoStmt = true
+		oldLockDepth := c.lockDepth
+		c.lockDepth = 0
+		goast.Inspect(v.Call, c.visitGoNodeInGoroutine)
+		c.inGoStmt = false
+		c.lockDepth = oldLockDepth
+		return false
+
+	case *goast.AssignStmt:
+		for _, lhs := range v.Lhs {
+			c.checkSharedVarWrite(lhs)
+		}
+
+	case *goast.IncDecStmt:
+		c.checkSharedVarWrite(v.X)
+
+	case *goast.IndexExpr:
+		c.checkSharedMapAccess(v)
+
+	case *goast.CallExpr:
+		c.handleLockCall(v)
+	}
+	return true
+}
+
+func (c *concurrencyChecker) visitGoNodeInGoroutine(n goast.Node) bool {
+	switch v := n.(type) {
+	case *goast.AssignStmt:
+		for _, lhs := range v.Lhs {
+			c.checkSharedVarWrite(lhs)
+		}
+
+	case *goast.IncDecStmt:
+		c.checkSharedVarWrite(v.X)
+
+	case *goast.IndexExpr:
+		c.checkSharedMapAccess(v)
+
+	case *goast.CallExpr:
+		c.handleLockCall(v)
+
+	case *goast.Ident:
+		if c.sharedVars[v.Name] && c.lockDepth == 0 {
+			c.reportError(v.Pos(), UnsynchronizedSharedVar,
+				fmt.Sprintf("shared variable %s accessed in goroutine without synchronization", v.Name))
+		}
+	}
+	return true
+}
+
+func (c *concurrencyChecker) visitXGoNode(n ast.Node) bool {
+	switch v := n.(type) {
+	case *ast.GoStmt:
+		c.inGoStmt = true
+		oldLockDepth := c.lockDepth
+		c.lockDepth = 0
+		ast.Inspect(v.Call, c.visitXGoNodeInGoroutine)
+		c.inGoStmt = false
+		c.lockDepth = oldLockDepth
+		return false
+	}
+	return true
+}
+
+func (c *concurrencyChecker) visitXGoNodeInGoroutine(n ast.Node) bool {
+	return true
+}
+
+func (c *concurrencyChecker) checkSharedVarWrite(expr goast.Expr) {
+	if !c.inGoStmt || c.lockDepth > 0 {
+		return
+	}
+	if id, ok := expr.(*goast.Ident); ok {
+		if c.sharedVars[id.Name] {
+			c.reportError(id.Pos(), UnsynchronizedSharedVar,
+				fmt.Sprintf("shared variable %s modified in goroutine without synchronization", id.Name))
+		}
+	}
+}
+
+func (c *concurrencyChecker) checkSharedMapAccess(expr *goast.IndexExpr) {
+	if !c.inGoStmt || c.lockDepth > 0 {
+		return
+	}
+	if id, ok := expr.X.(*goast.Ident); ok {
+		if c.sharedMaps[id.Name] {
+			c.reportError(id.Pos(), UnsynchronizedMapAccess,
+				fmt.Sprintf("shared map %s accessed in goroutine without synchronization", id.Name))
+		}
+	}
+}
+
+func (c *concurrencyChecker) handleLockCall(call *goast.CallExpr) {
+	sel, ok := call.Fun.(*goast.SelectorExpr)
+	if !ok {
+		return
+	}
+	recv, ok := sel.X.(*goast.Ident)
+	if !ok || !c.mutexVars[recv.Name] {
+		return
+	}
+	switch sel.Sel.Name {
+	case "Lock", "RLock":
+		c.lockDepth++
+	case "Unlock", "RUnlock":
+		if c.lockDepth > 0 {
+			c.lockDepth--
+		}
+	}
+}
+
+func (c *concurrencyChecker) reportError(pos token.Pos, code Code, msg string) {
+	if c.onErr != nil {
+		c.onErr(Error{
+			Fset: c.fset,
+			Pos:  pos,
+			Msg:  msg,
+			Code: code,
+			Soft: true,
+		})
+	}
+}
+
+// checkConcurrencySafety runs concurrency safety checks on the provided files.
+func checkConcurrencySafety(fset *token.FileSet, pkg *types.Package, goFiles []*goast.File, xgoFiles []*ast.File, onErr func(error)) {
+	c := newConcurrencyChecker(fset, pkg, onErr)
+	c.CheckFiles(goFiles, xgoFiles)
 }
